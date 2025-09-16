@@ -28,6 +28,22 @@
   .feed{display:flex;flex-direction:column;gap:8px;max-height:360px;overflow:auto}
   .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px}
   .card h3{margin:0 0 6px;font-size:14px}
+  .timeline-card{padding:12px}
+  .timeline{position:relative;padding-left:18px;display:flex;flex-direction:column;gap:12px;max-height:220px;overflow:auto}
+  .timeline::before{content:"";position:absolute;left:6px;top:0;bottom:0;width:2px;background:rgba(154,177,205,.25)}
+  .timeline-item{position:relative;padding-left:16px;opacity:0;transform:translateY(6px);transition:opacity .35s ease,transform .35s ease}
+  .timeline-item.show{opacity:1;transform:none}
+  .timeline-item.dim{opacity:.3}
+  .timeline-dot{position:absolute;left:-3px;top:4px;width:10px;height:10px;border-radius:50%;background:var(--muted);border:2px solid var(--border);box-shadow:0 0 0 3px var(--card)}
+  .timeline-item[data-stage="plan"] .timeline-dot{background:#5aa7ff}
+  .timeline-item[data-stage="research"] .timeline-dot{background:#9b7bff}
+  .timeline-item[data-stage="write"] .timeline-dot{background:#2ecc71}
+  .timeline-item[data-stage="done"] .timeline-dot{background:#f1c40f}
+  .timeline-item[data-stage="error"] .timeline-dot{background:#ff6b6b}
+  .timeline-body{display:flex;flex-direction:column;gap:4px}
+  .timeline-title{font-size:13px;font-weight:600;display:flex;gap:6px;align-items:flex-start;line-height:1.4}
+  .timeline-title .timeline-emoji{font-size:14px;line-height:1.3}
+  .timeline-detail{font-size:12px;color:var(--muted);white-space:pre-wrap;word-break:break-word}
   .tag{display:inline-block;padding:2px 6px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.04);font-size:12px}
   #report{min-height:220px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;overflow:auto}
   a{color:#9ec5ff}
@@ -56,6 +72,11 @@
         <div class="step" data-step="done">✅ 完成</div>
       </div>
       <div class="progress" style="margin:10px 0 16px;"><div class="bar" id="progbar"></div></div>
+
+      <div class="card timeline-card" style="margin-bottom:12px">
+        <h3 style="margin-bottom:10px">实时进度播报</h3>
+        <div id="timeline" class="timeline"></div>
+      </div>
 
       <div class="input-row">
         <input id="inpQuestion" style="min-width:240px" placeholder="输入你的问题…" />
@@ -110,19 +131,132 @@ const $=s=>document.querySelector(s);
 const api=()=>$('#apiBase').value.replace(/\/+$/,'');
 let sessionId=null, es=null, cy=null;
 
-function setStep(step){ document.querySelectorAll('.step').forEach(x=>{
-  const s=x.dataset.step; x.classList.toggle('active', s===step);
-  const order=['plan','research','write','done']; const idx=order.indexOf(step);
-  x.classList.toggle('done', order.indexOf(s)<idx);
-});}
-function setProg(v){ $('#progbar').style.width = Math.max(0,Math.min(1,v))*100 + '%'; }
+const timelineEl=$('#timeline');
+let timelineQueue=Promise.resolve();
+let activeStage=null;
+
+const PHASE_LABELS={plan:'澄清/规划',research:'研究执行',write:'整理写作',done:'完成'};
+
+function stageIcon(stage){ return ({plan:'🧭',research:'🔎',write:'📝',done:'✅',error:'⚠️'})[stage] || '•'; }
+
+function linkify(txt){
+  const escaped = (txt||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return escaped.replace(/(https?:\/\/[^\s)]+)/g, m=>`<a href="${m}" target="_blank">${m}</a>`);
+}
+
 function addCard(title, html, tags=[]){
   const div=document.createElement('div'); div.className='card';
   div.innerHTML = `<h3>${title}</h3><div class="hint" style="margin-bottom:6px">${tags.map(t=>`<span class="tag">${t}</span>`).join(' ')}</div><div>${html}</div>`;
   $('#feed').appendChild(div);
   $('#feed').scrollTop = $('#feed').scrollHeight;
 }
-function linkify(txt){ return (txt||'').replace(/(https?:\/\/[^\s)]+)/g, m=>`<a href="${m}" target="_blank">${m}</a>`); }
+
+function clearTimeline(showHint=false){
+  timelineQueue=Promise.resolve();
+  timelineEl.innerHTML='';
+  activeStage = null;
+  if(showHint){
+    addTimeline('plan','点击“新建会话”开始深度研究。','',{icon:'💡',className:'placeholder',delay:0});
+  }
+}
+
+function highlightTimeline(stage){
+  activeStage = stage;
+  timelineEl.querySelectorAll('.timeline-item').forEach(item=>{
+    if(!stage || stage==='done' || item.dataset.stage==='error'){
+      item.classList.remove('dim');
+    }else{
+      item.classList.toggle('dim', item.dataset.stage!==stage);
+    }
+  });
+}
+
+function addTimeline(stage, message, detail='', options={}){
+  if(!timelineEl) return;
+  if(timelineEl.firstElementChild && timelineEl.firstElementChild.classList.contains('placeholder')){
+    timelineEl.removeChild(timelineEl.firstElementChild);
+  }
+  const item=document.createElement('div');
+  item.className='timeline-item';
+  if(options.className) item.classList.add(options.className);
+  item.dataset.stage = stage || '';
+  const icon = options.icon || stageIcon(stage);
+  const detailHtml = detail ? `<div class="timeline-detail">${linkify(detail)}</div>` : '';
+  item.innerHTML = `
+    <div class="timeline-dot"></div>
+    <div class="timeline-body">
+      <div class="timeline-title">${icon ? `<span class="timeline-emoji">${icon}</span>` : ''}<span>${message}</span></div>
+      ${detailHtml}
+    </div>`;
+  timelineEl.appendChild(item);
+  requestAnimationFrame(()=> item.classList.add('show'));
+  timelineEl.scrollTop = timelineEl.scrollHeight;
+  const limit=80;
+  while(timelineEl.children.length>limit){
+    timelineEl.removeChild(timelineEl.firstElementChild);
+  }
+  if(activeStage){ highlightTimeline(activeStage); }
+}
+
+function queueTimeline(stage, message, detail='', options={}){
+  const delay = options.delay ?? 600;
+  timelineQueue = timelineQueue.then(()=> new Promise(resolve=>{
+    addTimeline(stage, message, detail, options);
+    if(delay<=0){ resolve(); return; }
+    setTimeout(resolve, delay);
+  }));
+  return timelineQueue;
+}
+
+function segmentText(text){
+  if(!text) return [];
+  const segments=[];
+  const lines = text.split(/\n+/);
+  for(const ln of lines){
+    const trimmed = ln.trim();
+    if(!trimmed) continue;
+    const matches = trimmed.match(/[^。！？.!?]+[。！？.!?]?/g);
+    if(matches){
+      matches.forEach(part=>{
+        const p = part.trim();
+        if(p) segments.push(p);
+      });
+    }else{
+      segments.push(trimmed);
+    }
+  }
+  return segments;
+}
+
+function queueNarrative(stage, text){
+  segmentText(text).forEach(seg=>{
+    queueTimeline(stage, seg, '', {className:'narrative', delay:520});
+  });
+}
+
+function setStep(step){
+  document.querySelectorAll('.step').forEach(x=>{
+    const s=x.dataset.step; x.classList.toggle('active', s===step);
+    const order=['plan','research','write','done']; const idx=order.indexOf(step);
+    x.classList.toggle('done', order.indexOf(s)<idx);
+  });
+  highlightTimeline(step);
+}
+
+function setProg(v){ $('#progbar').style.width = Math.max(0,Math.min(1,v))*100 + '%'; }
+
+async function safeFetch(url, options={}, context='请求'){
+  try{
+    const res = await fetch(url, options);
+    if(!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res;
+  }catch(err){
+    const msg = `${context}失败：${err.message}`;
+    addCard('系统提示', msg, ['error']);
+    queueTimeline('error', msg, '', {icon:'⚠️', delay:200});
+    throw err;
+  }
+}
 
 function initGraph(){
   cy = cytoscape({
@@ -135,16 +269,45 @@ function initGraph(){
   });
 }
 initGraph();
+clearTimeline(true);
 
-async function startController(){ await fetch(`${api()}/api/start`,{method:'POST'}); }
-async function stopController(){ await fetch(`${api()}/api/stop`,{method:'POST'}); }
+document.querySelectorAll('.step').forEach(step=>{
+  step.addEventListener('click',()=>{
+    highlightTimeline(step.dataset.step);
+  });
+});
 
-$('#btnStartCtl').onclick=()=>startController();
-$('#btnStopCtl').onclick=()=>stopController();
+$('#btnStartCtl').onclick=async ()=>{
+  $('#btnStartCtl').disabled = true;
+  try{
+    queueTimeline('plan','正在尝试启动控制器…','',{icon:'⚙️', delay:400});
+    await safeFetch(`${api()}/api/start`,{method:'POST'},'启动控制器');
+    queueTimeline('plan','控制器已启动，准备创建会话。','',{icon:'✅', delay:400});
+    addCard('控制器状态','控制器已经启动。',['status']);
+  }catch(_){
+  }finally{
+    $('#btnStartCtl').disabled=false;
+  }
+};
+
+$('#btnStopCtl').onclick=async ()=>{
+  $('#btnStopCtl').disabled = true;
+  try{
+    await safeFetch(`${api()}/api/stop`,{method:'POST'},'停止控制器');
+    queueTimeline('plan','控制器已停止。','',{icon:'🛑', delay:300});
+    addCard('控制器状态','控制器已停止。',['status']);
+  }catch(_){
+  }finally{
+    $('#btnStopCtl').disabled=false;
+  }
+};
 
 $('#btnTail').onclick=async ()=>{
-  const t = await fetch(`${api()}/api/logs/tail?lines=400`).then(r=>r.text());
-  $('#tail').textContent = t;
+  try{
+    const res = await safeFetch(`${api()}/api/logs/tail?lines=400`, {}, '获取日志');
+    $('#tail').textContent = await res.text();
+  }catch(_){
+  }
 };
 
 function handleEvent(ev){
@@ -154,22 +317,43 @@ function handleEvent(ev){
     cy.add([{group:'nodes', data:ev.root}]); cy.layout({name:'breadthfirst',directed:true}).run();
   }
   if(t==='phase'){
-    setStep(ev.phase||'research'); if(typeof ev.progress==='number') setProg(ev.progress);
-    addCard('阶段变更', `当前阶段：<b>${ev.phase}</b>`, ['phase']);
+    const phase = ev.phase || 'research';
+    setStep(phase);
+    if(typeof ev.progress==='number') setProg(ev.progress);
+    queueTimeline(phase, `进入阶段：${PHASE_LABELS[phase]||phase}`, '', {icon:stageIcon(phase), delay:380});
+    addCard('阶段变更', `当前阶段：<b>${phase}</b>`, ['phase']);
   }
   if(t==='progress'){ if(typeof ev.value==='number') setProg(ev.value); }
-  if(t==='tools'){ addCard('工具清单', (ev.tools||[]).map(x=>`<span class="tag">${x}</span>`).join(' '), ['tools']); }
-  if(t==='llm_message'){ addCard('阶段笔记', linkify(ev.text||''), ['note', ev.stage||'']); }
+  if(t==='tools'){
+    const tools = ev.tools||[];
+    addCard('工具清单', tools.map(x=>`<span class="tag">${x}</span>`).join(' '), ['tools']);
+    if(tools.length){ queueTimeline('plan', `已载入工具：${tools.join(', ')}`, '', {icon:'🧰', delay:420}); }
+  }
+  if(t==='status'){
+    const detail = (ev.detail||'');
+    const clipped = detail.length>600 ? detail.slice(0,600)+'…' : detail;
+    queueTimeline(ev.stage||'plan', ev.message||'', clipped, {icon:ev.icon});
+  }
+  if(t==='llm_message'){
+    addCard('阶段笔记', linkify(ev.text||''), ['note', ev.stage||'']);
+    queueNarrative(ev.stage||'plan', ev.text||'');
+  }
   if(t==='tool_call'){
-    addCard('工具调用', `调用 <b>${ev.name}</b><br/><pre style="white-space:pre-wrap">${linkify(JSON.stringify(ev.params||{},null,2))}</pre>`, ['tool']);
+    const params = JSON.stringify(ev.params||{},null,2);
+    const clipped = params.length>400 ? params.slice(0,400)+'…' : params;
+    addCard('工具调用', `调用 <b>${ev.name}</b><br/><pre style="white-space:pre-wrap">${linkify(params)}</pre>`, ['tool']);
+    queueTimeline('research', `正在调用工具 ${ev.name||''}…`, clipped, {icon:'🔧', delay:400});
     const id = 'n'+Math.random().toString(36).slice(2,8);
     cy.add([{group:'nodes', data:{id, label:`🔧 ${ev.name}`}}]);
     const last = cy.nodes().length>1? cy.nodes()[cy.nodes().length-2].id() : 'root';
     cy.add([{group:'edges', data:{source:last, target:id}}]); cy.layout({name:'breadthfirst',directed:true}).run();
   }
   if(t==='tool_result'){
-    const html = `<div>${linkify(ev.summary||'')}</div>`;
+    const summary = ev.summary||'';
+    const clipped = summary.length>600 ? summary.slice(0,600)+'…' : summary;
+    const html = `<div>${linkify(summary)}</div>`;
     addCard('工具结果', html, ['result', ev.name||'']);
+    queueTimeline('research', `${ev.name||'工具'} 返回结果`, clipped, {icon:'📄', delay:380});
     const id = 'n'+Math.random().toString(36).slice(2,8);
     cy.add([{group:'nodes', data:{id, label:`📄 ${ev.name||'result'}`}}]);
     const last = cy.nodes().length>1? cy.nodes()[cy.nodes().length-2].id() : 'root';
@@ -179,22 +363,40 @@ function handleEvent(ev){
     const html = marked.parse(ev.content||''); $('#report').innerHTML = html;
     addCard('最终报告已生成', '已在“最终报告”面板展示。', ['final']);
     setStep('done'); setProg(1);
+    queueTimeline('done', '最终报告已生成。', '', {icon:'✅', delay:400});
   }
-  if(t==='error'){ addCard('错误', linkify(ev.message||''), ['error']); }
+  if(t==='note'){
+    const level = ev.level || 'info';
+    addCard('系统提示', linkify(ev.text||''), [level]);
+    queueTimeline(level==='warn'?'error':'plan', ev.text||'', '', {icon: level==='warn'?'⚠️':'💬', delay:360});
+  }
+  if(t==='error'){
+    addCard('错误', linkify(ev.message||''), ['error']);
+    queueTimeline('error', ev.message||'发生未知错误', '', {icon:'⚠️', delay:200});
+  }
 }
 
 $('#btnNew').onclick=async ()=>{
   const q = $('#inpQuestion').value.trim(); if(!q){ alert('先输入你的问题'); return; }
-  const res = await fetch(`${api()}/api/session`, {method:'POST'}).then(r=>r.json());
-  sessionId = res.session_id;
-  addCard('新会话', `会话ID：<code>${sessionId}</code>`, ['session']);
-  $('#clarifyBox').style.display='block'; setStep('plan'); setProg(0.05);
-  const clar = await fetch(`${api()}/api/session/${sessionId}/clarify`,{
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({question:q})
-  }).then(r=>r.json());
-  if(clar.clarifying){
-    $('#clarifyList').innerHTML = clar.clarifying.map(x=>`<li>${linkify(x)}</li>`).join('');
-    addCard('澄清问题', '<ol>'+clar.clarifying.map(x=>`<li>${linkify(x)}</li>`).join('')+'</ol>', ['clarify']);
+  try{
+    clearTimeline(false);
+    queueTimeline('plan','正在创建新会话…','',{icon:'🧭', delay:400});
+    const res = await safeFetch(`${api()}/api/session`, {method:'POST'}, '创建会话');
+    const data = await res.json();
+    sessionId = data.session_id;
+    addCard('新会话', `会话ID：<code>${sessionId}</code>`, ['session']);
+    $('#clarifyBox').style.display='block'; setStep('plan'); setProg(0.05);
+    queueTimeline('plan','会话已就绪，正在生成澄清问题…','',{icon:'🧭', delay:420});
+    const clarRes = await safeFetch(`${api()}/api/session/${sessionId}/clarify`,{
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({question:q})
+    }, '生成澄清问题');
+    const clar = await clarRes.json();
+    if(clar.clarifying){
+      $('#clarifyList').innerHTML = clar.clarifying.map(x=>`<li>${linkify(x)}</li>`).join('');
+      addCard('澄清问题', '<ol>'+clar.clarifying.map(x=>`<li>${linkify(x)}</li>`).join('')+'</ol>', ['clarify']);
+      clar.clarifying.forEach(item=>queueTimeline('plan', item, '', {icon:'❓', delay:500}));
+    }
+  }catch(_){
   }
 };
 
@@ -203,27 +405,38 @@ $('#btnClarify').onclick=()=>$('#btnNew').click();
 $('#btnStartResearch').onclick=async ()=>{
   if(!sessionId){ alert('请先新建会话'); return; }
   const q = ($('#inpQuestion').value + '\n\n' + $('#clarifyAnswer').value).trim();
-  await fetch(`${api()}/api/session/${sessionId}/start`,{
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({query:q})
-  });
-  if(es) es.close();
-  es = new EventSource(`${api()}/api/session/${sessionId}/events/stream`);
-  es.onmessage = (e)=>{ try{ handleEvent(JSON.parse(e.data)); }catch(_){ } };
-  addCard('开始研究', '系统已开始深度研究…', ['run']);
+  try{
+    queueTimeline('plan','已收到补充信息，准备启动深度研究…','',{icon:'🚀', delay:420});
+    await safeFetch(`${api()}/api/session/${sessionId}/start`,{
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({query:q})
+    }, '启动深度研究');
+    if(es) es.close();
+    es = new EventSource(`${api()}/api/session/${sessionId}/events/stream`);
+    es.onmessage = (e)=>{ try{ handleEvent(JSON.parse(e.data)); }catch(_){ } };
+    es.onerror = ()=>{
+      queueTimeline('error','实时事件流中断，请检查控制器或网络。','',{icon:'⚠️', delay:200});
+      es.close();
+    };
+    addCard('开始研究', '系统已开始深度研究…', ['run']);
+  }catch(_){
+  }
 };
 
 ['MD','DOCX','PDF'].forEach(fmt=>{
   document.getElementById('btnExp'+fmt).onclick = async ()=>{
     if(!sessionId){ alert('请先完成一次研究。'); return; }
-    const res = await fetch(`${api()}/api/session/${sessionId}/export`, {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({format: fmt.toLowerCase()})
-    });
-    if(!res.ok){ alert('导出失败'); return; }
-    const blob = await res.blob(); const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = `deepresearch_${sessionId}.${fmt.toLowerCase()}`;
-    a.click(); URL.revokeObjectURL(a.href);
-  }
+    try{
+      const res = await safeFetch(`${api()}/api/session/${sessionId}/export`, {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({format: fmt.toLowerCase()})
+      }, `导出${fmt}`);
+      const blob = await res.blob(); const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = `deepresearch_${sessionId}.${fmt.toLowerCase()}`;
+      a.click(); URL.revokeObjectURL(a.href);
+      queueTimeline('done', `${fmt} 导出完成。`, '', {icon:'📦', delay:320});
+    }catch(_){
+    }
+  };
 });
-</script>
+</script></script>
 </body>
 </html>
