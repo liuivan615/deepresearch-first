@@ -2,6 +2,7 @@
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from typing import Optional, List, Dict, Any, Tuple, Awaitable, Callable
+import re
 from openai import AsyncOpenAI
 from contextlib import AsyncExitStack
 import json
@@ -30,6 +31,31 @@ def get_clear_json(text: str) -> Tuple[int, str]:
     if '```json' not in text:
         return 0, text
     return 1, text.split('```json')[1].split('```')[0]
+
+
+def extract_plan_steps(text: str) -> List[str]:
+    """Try to split the LLM planning message into discrete steps."""
+    if not text:
+        return []
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    steps: List[str] = []
+
+    for ln in lines:
+        m = re.match(r"^(?:\d+[\.\)]\s+|[-•]\s+)(.+)", ln)
+        if m:
+            steps.append(m.group(1).strip())
+        elif steps:
+            steps[-1] = (steps[-1] + " " + ln).strip()
+        else:
+            steps.append(ln)
+
+    if not steps:
+        # fallback to sentence split
+        matches = re.findall(r"[^。！？.!?]+[。！？.!?]?", text)
+        steps = [m.strip() for m in matches if m.strip()]
+
+    return steps
 
 # 实时事件回调类型
 EventCallback = Optional[Callable[[dict], Awaitable[None]]]
@@ -288,12 +314,21 @@ class MCPClient:
 
     async def process_query_stream(self, query: str, event_cb: EventCallback = None) -> str:
         """流式版本：在关键步骤通过 event_cb 推送事件，便于前端实时可视化"""
+
         async def emit(ev: dict):
             if event_cb:
                 try:
                     await event_cb(ev)
                 except Exception:
                     pass
+
+        async def emit_status(stage: str, message: str, detail: Optional[str] = None, icon: Optional[str] = None):
+            payload: Dict[str, Any] = {"type": "status", "stage": stage, "message": message}
+            if detail:
+                payload["detail"] = detail
+            if icon:
+                payload["icon"] = icon
+            await emit(payload)
 
         # 列出工具并告知前端
         response = await self.session.list_tools()
@@ -307,6 +342,7 @@ class MCPClient:
         } for tool in response.tools]
         await emit({"type": "tools", "tools": [t["function"]["name"] for t in available_tools]})
         await emit({"type": "phase", "phase": "plan", "progress": 0.1})
+        await emit_status("plan", "正在分析你的问题，准备制定检索计划…", icon="🧭")
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT + str(available_tools)},
@@ -316,7 +352,10 @@ class MCPClient:
         message = resp.choices[0].message
         await emit({"type":"llm_message","stage":"plan","text": message.content})
 
-        results = []
+        for step in extract_plan_steps(message.content):
+            await emit_status("plan", step, icon="🧭")
+
+        results: List[str] = []
         progress = 0.15
 
         while True:
@@ -324,30 +363,36 @@ class MCPClient:
 
             if flag == 0:
                 await emit({"type":"phase","phase":"write","progress": max(progress,0.8)})
+                await emit_status("write", "当前问题较为直接，系统将基于已有理解撰写回答。", icon="📝")
                 resp = await self.llm.create_chat_completion([{"role": "user", "content": query}])
                 final_text = resp.choices[0].message.content
                 await emit({"type":"final_report","format":"markdown","content": final_text})
                 await emit({"type":"phase","phase":"done","progress": 1.0})
+                await emit_status("done", "研究完成，已生成最终回答。", icon="✅")
                 return final_text
 
             try:
                 json_data = json.loads(json_text)
             except Exception as e:
                 await emit({"type":"note","level":"warn","text": f"工具 JSON 解析失败：{e}"})
+                await emit_status("error", "模型返回的工具指令解析失败，改为直接生成回答。", detail=str(e), icon="⚠️")
                 resp = await self.llm.create_chat_completion([{"role":"user","content": query}])
                 final_text = resp.choices[0].message.content
                 await emit({"type":"final_report","format":"markdown","content": final_text})
                 await emit({"type":"phase","phase":"done","progress": 1.0})
+                await emit_status("done", "研究完成，已生成最终回答。", icon="✅")
                 return final_text
 
             tool_name = json_data.get('name')
             tool_args = json_data.get('params', {})
             await emit({"type":"tool_call","name":tool_name,"params":tool_args})
+            await emit_status("research", f"准备调用 {tool_name} 工具…", detail=json.dumps(tool_args, ensure_ascii=False)[:300], icon="🔧")
 
             result = await self.session.call_tool(tool_name, tool_args)
             tool_text = result.content[0].text if result.content else ""
             results.append(tool_text)
             await emit({"type":"tool_result","name":tool_name,"summary": tool_text[:500], "raw": tool_text})
+            await emit_status("research", f"{tool_name} 返回了新的资料。", detail=tool_text[:500], icon="📄")
 
             messages.append({"role": "assistant","content": message.content})
             messages.append({"role": "user","content": f'工具调用结果如下：{result}'})
@@ -356,6 +401,7 @@ class MCPClient:
             progress = min(progress + 0.2, 0.75)
             await emit({"type":"progress","value":progress,"label":f"after {tool_name}"})
             await emit({"type":"phase","phase":"research","progress":progress})
+            await emit_status("research", "正在综合最新资料并思考下一步…", icon="🔎")
 
             resp = await self.llm.create_chat_completion(messages)
             message = resp.choices[0].message
@@ -363,6 +409,7 @@ class MCPClient:
 
             if 'finish' in message.content:
                 await emit({"type":"phase","phase":"write","progress": max(progress,0.85)})
+                await emit_status("write", "资料已充分，开始撰写结构化报告…", icon="📝")
                 break
 
             messages.append({"role": "assistant","content": message.content})
@@ -375,6 +422,7 @@ class MCPClient:
         final_text = resp.choices[0].message.content
         await emit({"type":"final_report","format":"markdown","content": final_text})
         await emit({"type":"phase","phase":"done","progress": 1.0})
+        await emit_status("done", "研究完成，报告已生成。", icon="✅")
         return final_text
 
     async def chat_loop(self):
