@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Deep‑Research 控制台 · 实时工作流</title>
+<style>
+  :root{--bg:#0b0f13;--panel:#12171d;--card:#151b23;--text:#e6edf3;--muted:#9fb0c3;--accent:#6aa6ff;--good:#2ecc71;--warn:#f1c40f;--bad:#ff6b6b;--border:#202a36;--code:#0e141a}
+  *{box-sizing:border-box} html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Helvetica,Arial}
+  header{position:sticky;top:0;z-index:10;background:linear-gradient(180deg,var(--panel),rgba(18,23,29,.85));border-bottom:1px solid var(--border);padding:10px 14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  h1{font-size:16px;margin:0 10px 0 0}
+  input,textarea{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px}
+  button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 12px;font-weight:600;cursor:pointer}
+  button.secondary{background:transparent;color:var(--text);border:1px solid var(--border)}
+  .hint{color:var(--muted);font-size:12px}
+  main{display:grid;grid-template-columns: 320px 1fr 380px;gap:12px;padding:12px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+  .panel h2{font-size:13px;margin:0;padding:10px 12px;border-bottom:1px solid var(--border);color:var(--muted);text-transform:uppercase;letter-spacing:.6px}
+  .panel .content{padding:12px}
+  .stepper{display:flex;gap:6px;flex-wrap:wrap}
+  .step{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:10px;border:1px solid var(--border);background:var(--card)}
+  .step.active{outline:2px solid var(--accent)}
+  .step.done{border-color:#224f2f;background:#0f1b15}
+  .progress{height:6px;background:#0e141a;border:1px solid var(--border);border-radius:999px;overflow:hidden}
+  .progress>.bar{height:100%;width:0%;background:linear-gradient(90deg,#5aa7ff,#9b7bff)}
+  #graph{height:360px;background:var(--card);border:1px solid var(--border);border-radius:10px}
+  .feed{display:flex;flex-direction:column;gap:8px;max-height:360px;overflow:auto}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px}
+  .card h3{margin:0 0 6px;font-size:14px}
+  .tag{display:inline-block;padding:2px 6px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.04);font-size:12px}
+  #report{min-height:220px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;overflow:auto}
+  a{color:#9ec5ff}
+  .input-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .hint{color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Deep‑Research 控制台</h1>
+  <input id="apiBase" type="text" value="http://127.0.0.1:8787" />
+  <button id="btnStartCtl">启动控制器</button>
+  <button id="btnStopCtl" class="secondary">停止</button>
+  <span class="hint">先启动控制器，再创建会话</span>
+</header>
+
+<main>
+  <!-- 左：阶段/澄清/导出 -->
+  <section class="panel">
+    <h2>阶段与澄清</h2>
+    <div class="content">
+      <div class="stepper" id="stepper">
+        <div class="step" data-step="plan">🧭 澄清/规划</div>
+        <div class="step" data-step="research">🔎 研究中</div>
+        <div class="step" data-step="write">📝 写作中</div>
+        <div class="step" data-step="done">✅ 完成</div>
+      </div>
+      <div class="progress" style="margin:10px 0 16px;"><div class="bar" id="progbar"></div></div>
+
+      <div class="input-row">
+        <input id="inpQuestion" style="min-width:240px" placeholder="输入你的问题…" />
+        <button id="btnNew">新建会话</button>
+        <button id="btnClarify" class="secondary">生成澄清</button>
+      </div>
+      <div id="clarifyBox" class="card" style="margin-top:8px;display:none">
+        <h3>澄清问题</h3>
+        <ol id="clarifyList"></ol>
+        <textarea id="clarifyAnswer" rows="4" style="width:100%;margin-top:8px" placeholder="补充你的偏好/范围/目标等…（可直接修改上面的问题并回答）"></textarea>
+        <div class="input-row" style="margin-top:8px">
+          <button id="btnStartResearch">开始深度研究</button>
+        </div>
+      </div>
+
+      <h2>导出</h2>
+      <div class="content">
+        <div class="input-row">
+          <button id="btnExpMD" class="secondary">导出 Markdown</button>
+          <button id="btnExpDOCX" class="secondary">导出 DOCX</button>
+          <button id="btnExpPDF" class="secondary">导出 PDF</button>
+        </div>
+        <div class="hint" style="margin-top:6px">PDF 如需中文更好显示，可在启动控制器前设置环境变量 <code>PDF_FONT_TTF</code> 指向一个中文字体 <code>.ttf</code>。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 中：图 & 报告 -->
+  <section class="panel">
+    <h2>推理树 / 依赖图（实时）</h2>
+    <div class="content"><div id="graph"></div></div>
+    <h2>最终报告</h2>
+    <div class="content"><div id="report" class="markdown-body"></div></div>
+  </section>
+
+  <!-- 右：事件流 / 日志 -->
+  <section class="panel">
+    <h2>实时事件与中间产物</h2>
+    <div class="content"><div id="feed" class="feed"></div></div>
+    <h2>原始日志（尾部）</h2>
+    <div class="content">
+      <pre id="tail" style="max-height:220px;overflow:auto"></pre>
+      <button id="btnTail" class="secondary">刷新日志</button>
+    </div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/marked@12/marked.min.js"></script>
+<script src="https://unpkg.com/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
+<script type="module">
+const $=s=>document.querySelector(s);
+const api=()=>$('#apiBase').value.replace(/\/+$/,'');
+let sessionId=null, es=null, cy=null;
+
+function setStep(step){ document.querySelectorAll('.step').forEach(x=>{
+  const s=x.dataset.step; x.classList.toggle('active', s===step);
+  const order=['plan','research','write','done']; const idx=order.indexOf(step);
+  x.classList.toggle('done', order.indexOf(s)<idx);
+});}
+function setProg(v){ $('#progbar').style.width = Math.max(0,Math.min(1,v))*100 + '%'; }
+function addCard(title, html, tags=[]){
+  const div=document.createElement('div'); div.className='card';
+  div.innerHTML = `<h3>${title}</h3><div class="hint" style="margin-bottom:6px">${tags.map(t=>`<span class="tag">${t}</span>`).join(' ')}</div><div>${html}</div>`;
+  $('#feed').appendChild(div);
+  $('#feed').scrollTop = $('#feed').scrollHeight;
+}
+function linkify(txt){ return (txt||'').replace(/(https?:\/\/[^\s)]+)/g, m=>`<a href="${m}" target="_blank">${m}</a>`); }
+
+function initGraph(){
+  cy = cytoscape({
+    container: $('#graph'),
+    style: [
+      { selector:'node', style:{ 'background-color':'#5aa7ff','label':'data(label)','color':'#e6edf3','text-valign':'center','text-halign':'center','font-size':12,'width':18,'height':18 }},
+      { selector:'edge', style:{ 'width':1.2,'line-color':'#445362','target-arrow-color':'#445362','target-arrow-shape':'triangle','curve-style':'bezier' }}
+    ],
+    layout: { name:'breadthfirst', directed:true, padding: 10 }
+  });
+}
+initGraph();
+
+async function startController(){ await fetch(`${api()}/api/start`,{method:'POST'}); }
+async function stopController(){ await fetch(`${api()}/api/stop`,{method:'POST'}); }
+
+$('#btnStartCtl').onclick=()=>startController();
+$('#btnStopCtl').onclick=()=>stopController();
+
+$('#btnTail').onclick=async ()=>{
+  const t = await fetch(`${api()}/api/logs/tail?lines=400`).then(r=>r.text());
+  $('#tail').textContent = t;
+};
+
+function handleEvent(ev){
+  const t = ev.type;
+  if(t==='graph_init'){
+    cy.elements().remove();
+    cy.add([{group:'nodes', data:ev.root}]); cy.layout({name:'breadthfirst',directed:true}).run();
+  }
+  if(t==='phase'){
+    setStep(ev.phase||'research'); if(typeof ev.progress==='number') setProg(ev.progress);
+    addCard('阶段变更', `当前阶段：<b>${ev.phase}</b>`, ['phase']);
+  }
+  if(t==='progress'){ if(typeof ev.value==='number') setProg(ev.value); }
+  if(t==='tools'){ addCard('工具清单', (ev.tools||[]).map(x=>`<span class="tag">${x}</span>`).join(' '), ['tools']); }
+  if(t==='llm_message'){ addCard('阶段笔记', linkify(ev.text||''), ['note', ev.stage||'']); }
+  if(t==='tool_call'){
+    addCard('工具调用', `调用 <b>${ev.name}</b><br/><pre style="white-space:pre-wrap">${linkify(JSON.stringify(ev.params||{},null,2))}</pre>`, ['tool']);
+    const id = 'n'+Math.random().toString(36).slice(2,8);
+    cy.add([{group:'nodes', data:{id, label:`🔧 ${ev.name}`}}]);
+    const last = cy.nodes().length>1? cy.nodes()[cy.nodes().length-2].id() : 'root';
+    cy.add([{group:'edges', data:{source:last, target:id}}]); cy.layout({name:'breadthfirst',directed:true}).run();
+  }
+  if(t==='tool_result'){
+    const html = `<div>${linkify(ev.summary||'')}</div>`;
+    addCard('工具结果', html, ['result', ev.name||'']);
+    const id = 'n'+Math.random().toString(36).slice(2,8);
+    cy.add([{group:'nodes', data:{id, label:`📄 ${ev.name||'result'}`}}]);
+    const last = cy.nodes().length>1? cy.nodes()[cy.nodes().length-2].id() : 'root';
+    cy.add([{group:'edges', data:{source:last, target:id}}]); cy.layout({name:'breadthfirst',directed:true}).run();
+  }
+  if(t==='final_report'){
+    const html = marked.parse(ev.content||''); $('#report').innerHTML = html;
+    addCard('最终报告已生成', '已在“最终报告”面板展示。', ['final']);
+    setStep('done'); setProg(1);
+  }
+  if(t==='error'){ addCard('错误', linkify(ev.message||''), ['error']); }
+}
+
+$('#btnNew').onclick=async ()=>{
+  const q = $('#inpQuestion').value.trim(); if(!q){ alert('先输入你的问题'); return; }
+  const res = await fetch(`${api()}/api/session`, {method:'POST'}).then(r=>r.json());
+  sessionId = res.session_id;
+  addCard('新会话', `会话ID：<code>${sessionId}</code>`, ['session']);
+  $('#clarifyBox').style.display='block'; setStep('plan'); setProg(0.05);
+  const clar = await fetch(`${api()}/api/session/${sessionId}/clarify`,{
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({question:q})
+  }).then(r=>r.json());
+  if(clar.clarifying){
+    $('#clarifyList').innerHTML = clar.clarifying.map(x=>`<li>${linkify(x)}</li>`).join('');
+    addCard('澄清问题', '<ol>'+clar.clarifying.map(x=>`<li>${linkify(x)}</li>`).join('')+'</ol>', ['clarify']);
+  }
+};
+
+$('#btnClarify').onclick=()=>$('#btnNew').click();
+
+$('#btnStartResearch').onclick=async ()=>{
+  if(!sessionId){ alert('请先新建会话'); return; }
+  const q = ($('#inpQuestion').value + '\n\n' + $('#clarifyAnswer').value).trim();
+  await fetch(`${api()}/api/session/${sessionId}/start`,{
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({query:q})
+  });
+  if(es) es.close();
+  es = new EventSource(`${api()}/api/session/${sessionId}/events/stream`);
+  es.onmessage = (e)=>{ try{ handleEvent(JSON.parse(e.data)); }catch(_){ } };
+  addCard('开始研究', '系统已开始深度研究…', ['run']);
+};
+
+['MD','DOCX','PDF'].forEach(fmt=>{
+  document.getElementById('btnExp'+fmt).onclick = async ()=>{
+    if(!sessionId){ alert('请先完成一次研究。'); return; }
+    const res = await fetch(`${api()}/api/session/${sessionId}/export`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({format: fmt.toLowerCase()})
+    });
+    if(!res.ok){ alert('导出失败'); return; }
+    const blob = await res.blob(); const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = `deepresearch_${sessionId}.${fmt.toLowerCase()}`;
+    a.click(); URL.revokeObjectURL(a.href);
+  }
+});
+</script>
+</body>
+</html>
