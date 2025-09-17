@@ -1,5 +1,5 @@
 # control_server.py  —— 实时会话 + 事件流 + 导出
-import os, asyncio, json, uuid, re
+import os, asyncio, json, uuid, re, logging
 from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, Body
@@ -19,11 +19,21 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"],
 )
 
+logger = logging.getLogger("control_server")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+
 _client: Optional[MCPClient] = None
 _client_lock = asyncio.Lock()
+_active_choice = {
+    "requested_provider": None,
+    "active_provider": None,
+    "requested_model": None,
+    "resolved_model": None,
+}
 
 class LiveSession:
-    def __init__(self, sid:str):
+    def __init__(self, sid:str, provider: Optional[str] = None, model: Optional[str] = None):
         self.id = sid
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.task: Optional[asyncio.Task] = None
@@ -31,25 +41,70 @@ class LiveSession:
         self.final_md: str = ""
         self.graph_nodes: List[Dict[str,Any]] = []
         self.graph_edges: List[Dict[str,Any]] = []
+        self.provider = provider
+        self.model = model
 
 _sessions: Dict[str, LiveSession] = {}
 
 # --------- 工具函数 ---------
-async def ensure_client_started():
+async def _start_client_locked(provider_override: Optional[str], model_override: Optional[str]):
+    global _client, _active_choice
+    if _client:
+        await _client.close()
+    client = MCPClient(provider_override=provider_override, model_override=model_override)
+    await client.connect_to_server("./search_mcp.py")
+    _client = client
+    _active_choice["requested_provider"] = provider_override or getattr(client.llm, "provider_mode", None)
+    _active_choice["requested_model"] = model_override or getattr(client.llm, "requested_model", None)
+    _active_choice["active_provider"] = getattr(client.llm, "active_provider", None) or provider_override
+    _active_choice["resolved_model"] = getattr(client.llm, "model_name", None)
+    logger.info(
+        "[Controller] MCP client active provider=%s requested=%s resolved=%s",
+        _active_choice["active_provider"],
+        model_override,
+        _active_choice["resolved_model"],
+    )
+
+
+async def ensure_client_started(provider: Optional[str] = None, model: Optional[str] = None):
     global _client
     async with _client_lock:
         if _client is None:
-            _client = MCPClient()
-            await _client.connect_to_server("./search_mcp.py")
+            await _start_client_locked(
+                provider if provider is not None else _active_choice.get("requested_provider"),
+                model if model is not None else _active_choice.get("requested_model"),
+            )
+        else:
+            if provider and provider != _active_choice.get("requested_provider"):
+                logger.info(
+                    "[Controller] client already running with provider=%s, ignore requested provider=%s",
+                    _active_choice.get("requested_provider"),
+                    provider,
+                )
+            if model and model != _active_choice.get("requested_model"):
+                logger.info(
+                    "[Controller] client already running with model=%s, ignore requested model=%s",
+                    _active_choice.get("requested_model"),
+                    model,
+                )
 
 def sse_format(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 # --------- 控制器原有 ---------
 @app.post("/api/start")
-async def start_controller():
-    await ensure_client_started()
-    return {"status": "started"}
+async def start_controller(payload: Optional[dict] = Body(default=None)):
+    data = payload or {}
+    provider = data.get("provider")
+    model = data.get("model")
+    async with _client_lock:
+        await _start_client_locked(provider, model)
+    logger.info("[Controller] start requested provider=%s model=%s", provider, model)
+    return {
+        "status": "started",
+        "provider": _active_choice.get("active_provider"),
+        "model": _active_choice.get("resolved_model"),
+    }
 
 @app.post("/api/stop")
 async def stop_controller():
@@ -58,15 +113,28 @@ async def stop_controller():
         if _client:
             await _client.close()
         _client = None
+        _active_choice.update({
+            "active_provider": None,
+            "requested_provider": None,
+            "requested_model": None,
+            "resolved_model": None,
+        })
     return {"status":"stopped"}
 
 @app.get("/api/status")
 async def status():
     running = _client is not None
-    provider = _client.llm and ("ollama" if _client.llm.ollama else "api")
-    model = _client.llm.model_name if (_client and _client.llm) else None
+    provider = _active_choice.get("active_provider")
+    model = _active_choice.get("resolved_model")
+    requested_model = _active_choice.get("requested_model")
     ollama_models = _client.llm.ollama.models if (_client and _client.llm and _client.llm.ollama) else []
-    return {"running": bool(running), "provider": provider, "model": model, "ollama_models": ollama_models}
+    return {
+        "running": bool(running),
+        "provider": provider,
+        "model": model,
+        "requested_model": requested_model,
+        "ollama_models": ollama_models,
+    }
 
 @app.get("/api/logs/tail", response_class=PlainTextResponse)
 async def logs_tail(lines: int = 400):
@@ -81,14 +149,27 @@ async def logs_tail(lines: int = 400):
 
 # --------- 新：会话 / 事件流 / 交互 ----------
 @app.post("/api/session")
-async def create_session():
+async def create_session(payload: Optional[dict] = Body(default=None)):
+    data = payload or {}
     sid = uuid.uuid4().hex
-    _sessions[sid] = LiveSession(sid)
-    return {"session_id": sid}
+    sess = LiveSession(sid, provider=data.get("provider"), model=data.get("model"))
+    _sessions[sid] = sess
+    logger.info("[Session:%s] created with model=%s provider=%s", sid, sess.model, sess.provider)
+    return {"session_id": sid, "model": sess.model, "provider": sess.provider}
 
 @app.post("/api/session/{sid}/clarify")
 async def clarify(sid: str, payload: dict = Body(...)):
-    await ensure_client_started()
+    sess = _sessions.get(sid)
+    model = payload.get("model") if isinstance(payload, dict) else None
+    provider = payload.get("provider") if isinstance(payload, dict) else None
+    if sess:
+        if model:
+            sess.model = model
+        if provider:
+            sess.provider = provider
+        provider = provider or sess.provider
+        model = model or sess.model
+    await ensure_client_started(provider=provider, model=model)
     question = (payload.get("question") or "").strip()
     if not question:
         return JSONResponse({"error":"empty_question"}, status_code=400)
@@ -103,7 +184,30 @@ async def clarify(sid: str, payload: dict = Body(...)):
 
 @app.post("/api/session/{sid}/start")
 async def start_research(sid:str, payload: dict = Body(...)):
-    await ensure_client_started()
+    sess = _sessions.get(sid)
+    provider = payload.get("provider") if isinstance(payload, dict) else None
+    model = payload.get("model") if isinstance(payload, dict) else None
+    if sess:
+        if provider:
+            sess.provider = provider
+        if model:
+            sess.model = model
+        provider = provider or sess.provider
+        model = model or sess.model
+    await ensure_client_started(provider=provider, model=model)
+    if sess:
+        logger.info(
+            "[Session:%s] starting research with requested_model=%s active_model=%s",
+            sid,
+            sess.model,
+            _active_choice.get("resolved_model"),
+        )
+    else:
+        logger.info(
+            "[Session:%s] starting research with active_model=%s",
+            sid,
+            _active_choice.get("resolved_model"),
+        )
     sess = _sessions.get(sid)
     if not sess: return JSONResponse({"error":"session_not_found"}, status_code=404)
 

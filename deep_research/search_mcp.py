@@ -7,12 +7,28 @@ import pymysql
 import pandas as pd
 from prompts import *
 import logging
+import os
+import sys
 
 
+def _resolve_model_override() -> str:
+    for idx, arg in enumerate(sys.argv[1:]):
+        if arg.startswith("--model="):
+            return arg.split("=", 1)[1]
+        if arg == "--model" and idx + 2 <= len(sys.argv):
+            return sys.argv[idx + 2]
+    return os.getenv("OLLAMA_MODEL") or os.getenv("OLLAMA_MODEL_PREFERENCE")
 
-base_url = "https://openrouter.ai/api/v1"
-api_key = 'aaa'
-model_name = 'deepseek/deepseek-chat:free'
+
+base_url = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
+api_key = os.getenv("OPENAI_API_KEY", "aaa")
+provider_mode = (os.getenv("LLM_PROVIDER") or "auto").lower()
+if provider_mode == "ollama":
+    base_url = os.getenv("OLLAMA_OPENAI_BASE", base_url)
+    api_key = os.getenv("OPENAI_API_KEY") or "ollama"
+
+model_override = _resolve_model_override()
+model_name = model_override or os.getenv("OPENAI_MODEL", "deepseek/deepseek-chat:free")
 
 # 创建日志记录器
 logger = logging.getLogger(__name__)
@@ -31,6 +47,14 @@ file_handler.setLevel(logging.INFO)
 file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(file_formatter)
 logger.addHandler(file_handler)
+
+logger.info(
+    "[Search MCP] provider=%s model=%s base=%s override=%s",
+    provider_mode,
+    model_name,
+    base_url,
+    bool(model_override),
+)
 
 client = OpenAI(
             base_url=base_url,

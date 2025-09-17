@@ -141,6 +141,8 @@ class UnifiedLLM:
 
         self.client: Optional[AsyncOpenAI] = None
         self.ollama: Optional[OllamaModelWatcher] = None
+        self.active_provider: Optional[str] = None
+        self.requested_model: Optional[str] = model_name
 
     async def init(self):
         mode = self.provider_mode
@@ -159,6 +161,7 @@ class UnifiedLLM:
                         base_url=self.ollama_openai_base,
                         api_key=self.api_key or "ollama",
                     )
+                    self.active_provider = "ollama"
                     logger.info(f"[LLM] 使用 Ollama（OpenAI 兼容）: base={self.ollama_openai_base}, model={self.model_name}")
                     return
                 else:
@@ -168,6 +171,7 @@ class UnifiedLLM:
 
         # 回退到 API
         self.client = AsyncOpenAI(base_url=self.api_base, api_key=self.api_key)
+        self.active_provider = "api"
         logger.info(f"[LLM] 使用 API: base={self.api_base}, model={self.model_name}")
 
     async def aclose(self):
@@ -195,14 +199,16 @@ class UnifiedLLM:
 # MCP 客户端
 # =========================
 class MCPClient:
-    def __init__(self):
+    def __init__(self, provider_override: Optional[str] = None, model_override: Optional[str] = None):
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
+        self.provider_override = provider_override
+        self.model_override = model_override
         self.llm = UnifiedLLM(
-            provider=DEFAULT_PROVIDER,
+            provider=provider_override or DEFAULT_PROVIDER,
             api_base=DEFAULT_API_BASE,
             api_key=DEFAULT_API_KEY,
-            model_name=DEFAULT_API_MODEL,
+            model_name=model_override or DEFAULT_API_MODEL,
             ollama_host=OLLAMA_HOST,
             ollama_openai_base=OLLAMA_OPENAI_BASE,
             poll_interval=OLLAMA_POLL_INTERVAL,
@@ -212,10 +218,30 @@ class MCPClient:
         await self.llm.init()
 
         # 使用当前解释器启动 MCP 服务器（Windows 更稳）
+        env = dict(os.environ)
+        env_updates = {}
+        if self.llm.api_base:
+            env_updates.setdefault("OPENAI_BASE_URL", self.llm.api_base)
+        if self.llm.api_key:
+            env_updates.setdefault("OPENAI_API_KEY", self.llm.api_key)
+        if self.llm.ollama_openai_base:
+            env_updates.setdefault("OLLAMA_OPENAI_BASE", self.llm.ollama_openai_base)
+        if self.provider_override:
+            env_updates["LLM_PROVIDER"] = self.provider_override
+        elif self.llm.active_provider:
+            env_updates["LLM_PROVIDER"] = self.llm.active_provider
+        if self.model_override:
+            env_updates["OLLAMA_MODEL"] = self.model_override
+            env_updates["OLLAMA_MODEL_PREFERENCE"] = self.model_override
+            env_updates["OPENAI_MODEL"] = self.model_override
+        elif self.llm.model_name:
+            env_updates.setdefault("OPENAI_MODEL", self.llm.model_name)
+        env.update({k: v for k, v in env_updates.items() if v is not None})
+
         server_params = StdioServerParameters(
             command=sys.executable,
             args=[server_script_path],
-            env=None
+            env=env
         )
 
         stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
