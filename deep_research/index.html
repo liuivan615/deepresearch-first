@@ -39,6 +39,10 @@
 <header>
   <h1>Deep‑Research 控制台</h1>
   <input id="apiBase" type="text" value="http://127.0.0.1:8787" />
+  <select id="modelSelect">
+    <option value="gpt-oss:20b">gpt-oss:20b</option>
+    <option value="qwen3:30b">qwen3:30b</option>
+  </select>
   <button id="btnStartCtl">启动控制器</button>
   <button id="btnStopCtl" class="secondary">停止</button>
   <span class="hint">先启动控制器，再创建会话</span>
@@ -136,7 +140,15 @@ function initGraph(){
 }
 initGraph();
 
-async function startController(){ await fetch(`${api()}/api/start`,{method:'POST'}); }
+const modelConfig=()=>({model: $('#modelSelect').value, provider: 'ollama'});
+
+async function startController(){
+  await fetch(`${api()}/api/start`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(modelConfig())
+  });
+}
 async function stopController(){ await fetch(`${api()}/api/stop`,{method:'POST'}); }
 
 $('#btnStartCtl').onclick=()=>startController();
@@ -185,12 +197,16 @@ function handleEvent(ev){
 
 $('#btnNew').onclick=async ()=>{
   const q = $('#inpQuestion').value.trim(); if(!q){ alert('先输入你的问题'); return; }
-  const res = await fetch(`${api()}/api/session`, {method:'POST'}).then(r=>r.json());
+  const res = await fetch(`${api()}/api/session`, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(modelConfig())
+  }).then(r=>r.json());
   sessionId = res.session_id;
   addCard('新会话', `会话ID：<code>${sessionId}</code>`, ['session']);
   $('#clarifyBox').style.display='block'; setStep('plan'); setProg(0.05);
   const clar = await fetch(`${api()}/api/session/${sessionId}/clarify`,{
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({question:q})
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({question:q, ...modelConfig()})
   }).then(r=>r.json());
   if(clar.clarifying){
     $('#clarifyList').innerHTML = clar.clarifying.map(x=>`<li>${linkify(x)}</li>`).join('');
@@ -204,7 +220,7 @@ $('#btnStartResearch').onclick=async ()=>{
   if(!sessionId){ alert('请先新建会话'); return; }
   const q = ($('#inpQuestion').value + '\n\n' + $('#clarifyAnswer').value).trim();
   await fetch(`${api()}/api/session/${sessionId}/start`,{
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({query:q})
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({query:q, ...modelConfig()})
   });
   if(es) es.close();
   es = new EventSource(`${api()}/api/session/${sessionId}/events/stream`);
